@@ -84,7 +84,10 @@ echo ""
 # 1. ATUALIZAR SISTEMA
 # ============================================================
 print_step "Atualizando sistema..."
-apt-get update -qq && apt-get upgrade -y -qq
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get upgrade -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef"
+
 print_success "Sistema atualizado"
 
 # ============================================================
