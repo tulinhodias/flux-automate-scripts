@@ -4,9 +4,11 @@
 # FLUX AUTOMATE - Script Adicional: Evolution API
 # Adiciona Evolution API a uma instalacao Flux existente
 # Requisito: install-base.sh ja executado
+# Usa: Nginx + Certbot (mesmo padrao da base)
 # ============================================================
 
 set -e
+export DEBIAN_FRONTEND=noninteractive
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -25,37 +27,77 @@ echo "        WhatsApp Nao Oficial                  "
 echo "=============================================="
 echo -e "${NC}"
 
+# ============================================================
+# PARSEAR ARGUMENTOS
+# ============================================================
 EVOLUTION_HOST=""
+EMAIL=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --evolution) EVOLUTION_HOST="$2"; shift 2 ;;
+        --email) EMAIL="$2"; shift 2 ;;
         *) print_error "Argumento desconhecido: $1"; exit 1 ;;
     esac
 done
 
 if [ -z "$EVOLUTION_HOST" ]; then
     print_error "Argumento obrigatorio faltando!"
-    echo "Uso: bash install-evolution.sh --evolution evolution.seudominio.com"
+    echo ""
+    echo "Uso:"
+    echo "  bash install-evolution.sh \\"
+    echo "    --evolution evolution.seudominio.com \\"
+    echo "    --email seuemail@email.com"
     exit 1
 fi
 
-# Verificar instalacao base
+# ============================================================
+# VERIFICAR INSTALACAO BASE
+# ============================================================
 print_step "Verificando instalacao base..."
-if [ ! -f /opt/flux/docker-compose.yml ] || ! docker network inspect flux_network &>/dev/null; then
-    print_error "Instalacao base nao encontrada! Execute primeiro o install-base.sh"
+
+if [ ! -f /opt/flux/docker-compose.yml ]; then
+    print_error "Instalacao base nao encontrada!"
+    echo "Execute primeiro o install-base.sh"
     exit 1
 fi
+
+if ! docker network inspect flux_network &>/dev/null; then
+    print_error "Rede flux_network nao encontrada!"
+    echo "Execute primeiro o install-base.sh"
+    exit 1
+fi
+
 print_success "Instalacao base encontrada"
 
-# Carregar .env existente
-print_step "Carregando configuracoes..."
+# ============================================================
+# CARREGAR .ENV E RECUPERAR EMAIL
+# ============================================================
+print_step "Carregando configuracoes existentes..."
 source /opt/flux/.env
+
+# Usar email do argumento ou do .env
+if [ -z "$EMAIL" ]; then
+    EMAIL="${SSL_EMAIL}"
+fi
+
+if [ -z "$EMAIL" ]; then
+    print_error "Email nao encontrado. Use --email seuemail@email.com"
+    exit 1
+fi
+
 print_success "Configuracoes carregadas"
 
+# ============================================================
+# GERAR CHAVE DA EVOLUTION
+# ============================================================
 EVOLUTION_API_KEY=$(openssl rand -hex 24)
 
-# Adicionar ao .env
+# ============================================================
+# ADICIONAR AO .ENV
+# ============================================================
+print_step "Adicionando Evolution ao .env..."
+
 cat >> /opt/flux/.env << ENVEOF
 
 # Evolution API
@@ -63,21 +105,31 @@ EVOLUTION_HOST=${EVOLUTION_HOST}
 EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
 ENVEOF
 
-mkdir -p /opt/flux/evolution
+print_success "Evolution adicionado ao .env"
 
-# Criar docker-compose da Evolution
+# ============================================================
+# CRIAR DIRETORIO
+# ============================================================
+mkdir -p /opt/flux/evolution
+print_success "Diretorio Evolution criado"
+
+# ============================================================
+# CRIAR DOCKER COMPOSE DA EVOLUTION
+# ============================================================
 print_step "Criando docker-compose da Evolution..."
 
-cat > /opt/flux/docker-compose.evolution.yml << 'COMPOSEEOF'
+cat > /opt/flux/docker-compose.evolution.yml << COMPOSEEOF
 services:
 
   evolution:
     image: atendai/evolution-api:latest
     container_name: flux_evolution
-    restart: always
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       SERVER_URL: https://${EVOLUTION_HOST}
-      SERVER_PORT: 8080
+      SERVER_PORT: "8080"
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
       AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
       DATABASE_PROVIDER: postgresql
@@ -96,19 +148,13 @@ services:
       DEL_INSTANCE: "false"
       WEBHOOK_GLOBAL_ENABLED: "false"
       WEBHOOK_GLOBAL_URL: ""
-      QRCODE_LIMIT: 10
+      QRCODE_LIMIT: "10"
       QRCODE_COLOR: "#000000"
       TZ: America/Sao_Paulo
     volumes:
       - /opt/flux/evolution:/evolution/instances
     networks:
       - flux_network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.evolution.rule=Host(`${EVOLUTION_HOST}`)"
-      - "traefik.http.routers.evolution.entrypoints=websecure"
-      - "traefik.http.routers.evolution.tls.certresolver=letsencrypt"
-      - "traefik.http.services.evolution.loadbalancer.server.port=8080"
 
 networks:
   flux_network:
@@ -117,16 +163,64 @@ COMPOSEEOF
 
 print_success "Docker Compose Evolution criado"
 
-# Subir
+# ============================================================
+# SUBIR EVOLUTION
+# ============================================================
 print_step "Iniciando Evolution API..."
 cd /opt/flux
-docker compose -f docker-compose.yml -f docker-compose.evolution.yml --env-file .env up -d evolution
+docker compose -f docker-compose.yml -f docker-compose.evolution.yml up -d evolution
 
-print_step "Aguardando (10s)..."
-sleep 10
+print_step "Aguardando Evolution ficar pronta (15s)..."
+sleep 15
 
+# ============================================================
+# CONFIGURAR NGINX
+# ============================================================
+print_step "Configurando Nginx para Evolution..."
+
+cat >> /etc/nginx/sites-available/flux << NGINXEOF
+
+# Evolution API
+server {
+    listen 80;
+    server_name ${EVOLUTION_HOST};
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINXEOF
+
+nginx -t && systemctl reload nginx
+print_success "Nginx configurado para Evolution"
+
+# ============================================================
+# GERAR SSL
+# ============================================================
+print_step "Gerando certificado SSL para Evolution..."
+
+certbot --nginx \
+    --non-interactive \
+    --agree-tos \
+    --redirect \
+    -m "$EMAIL" \
+    -d "$EVOLUTION_HOST"
+
+print_success "SSL ativado para Evolution"
+
+# ============================================================
+# VERIFICAR STATUS
+# ============================================================
 status=$(docker inspect -f '{{.State.Status}}' flux_evolution 2>/dev/null || echo "not found")
 if [ "$status" = "running" ]; then
+    echo ""
     echo -e "${GREEN}"
     echo "=============================================="
     echo "     EVOLUTION API INSTALADA COM SUCESSO!     "
@@ -134,15 +228,18 @@ if [ "$status" = "running" ]; then
     echo -e "${NC}"
     echo ""
     echo -e "${BLUE}Acesse:${NC} https://${EVOLUTION_HOST}"
-    echo -e "${YELLOW}API Key:${NC} ${EVOLUTION_API_KEY}"
     echo ""
-    echo -e "${YELLOW}IMPORTANTE: Anote a API Key!${NC}"
+    echo -e "${YELLOW}API Key:${NC} ${EVOLUTION_API_KEY}"
+    echo -e "${YELLOW}IMPORTANTE: Anote a API Key acima!${NC}"
     echo ""
     echo -e "${BLUE}Comandos uteis:${NC}"
     echo "  Logs:       cd /opt/flux && docker compose -f docker-compose.yml -f docker-compose.evolution.yml logs -f evolution"
-    echo "  Reiniciar:  cd /opt/flux && docker compose -f docker-compose.yml -f docker-compose.evolution.yml restart evolution"
+    echo "  Reiniciar:  docker restart flux_evolution"
     echo "  Atualizar:  cd /opt/flux && docker compose -f docker-compose.yml -f docker-compose.evolution.yml pull evolution && docker compose -f docker-compose.yml -f docker-compose.evolution.yml up -d evolution"
     echo ""
+    echo -e "${BLUE}Proximo passo:${NC} Acesse https://${EVOLUTION_HOST} e crie sua primeira instancia"
+    echo ""
 else
-    print_error "Evolution nao iniciou. Logs: docker logs flux_evolution"
+    print_error "Evolution nao iniciou corretamente"
+    echo "Verifique os logs: docker logs flux_evolution"
 fi
