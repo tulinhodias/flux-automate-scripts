@@ -22,7 +22,7 @@ print_error() { echo -e "${RED}[X]${NC} $1"; }
 
 echo -e "${GREEN}"
 echo "=============================================="
-echo "     FLUX AUTOMATE - Evolution API            "
+echo "     FLUX AUTOMATE - Evolution API v2.3.7     "
 echo "        WhatsApp Nao Oficial                  "
 echo "=============================================="
 echo -e "${NC}"
@@ -76,7 +76,6 @@ print_success "Instalacao base encontrada"
 print_step "Carregando configuracoes existentes..."
 source /opt/flux/.env
 
-# Usar email do argumento ou do .env
 if [ -z "$EMAIL" ]; then
     EMAIL="${SSL_EMAIL}"
 fi
@@ -122,7 +121,7 @@ cat > /opt/flux/docker-compose.evolution.yml << COMPOSEEOF
 services:
 
   evolution:
-    image: atendai/evolution-api:latest
+    image: evoapicloud/evolution-api:v2.3.7
     container_name: flux_evolution
     restart: unless-stopped
     ports:
